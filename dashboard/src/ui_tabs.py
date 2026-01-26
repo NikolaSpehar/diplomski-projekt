@@ -737,10 +737,10 @@ def render_tab_distribution_check(df_view: pd.DataFrame, path_5g_train: str):
     col_name = cols_map[selected_label]
 
     # Prepare data for plotting
-    df_ref_plot = df_ref[[col_name]].copy()
+    df_ref_plot = df_ref[[col_name]].sample(n=min(5000, len(df_ref))).copy()
     df_ref_plot["Dataset"] = "5G Training (Ref)"
-    
-    df_curr_plot = df_view[[col_name]].copy()
+
+    df_curr_plot = df_view[[col_name]].sample(n=min(5000, len(df_view))).copy()
     df_curr_plot["Dataset"] = "Current Dataset (View)"
     
     plot_df = pd.concat([df_ref_plot, df_curr_plot], axis=0)

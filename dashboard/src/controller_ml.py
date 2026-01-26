@@ -53,8 +53,7 @@ def apply_simulation_only(
     alpha: float,
 ) -> pd.DataFrame:
     """
-    Fast path: Applies hysteresis and energy calc assuming 'p_sleep_on' exists.
-    Ensures output schema matches dashboard expectations (p30, p70).
+    OPTIMIZED: Replaces .apply() with a faster transform logic.
     """
     df_out = df_with_probs.copy()
     
@@ -62,48 +61,47 @@ def apply_simulation_only(
     cell_col = resolve_col(df_out, "cell")
     rru_col = resolve_col(df_out, "rru_w")
 
-    if "p_sleep_on" not in df_out.columns:
-        raise ValueError("apply_simulation_only: 'p_sleep_on' column missing.")
-    
-    if "DayIndex" not in df_out.columns or "tod_bin" not in df_out.columns:
-        raise ValueError("apply_simulation_only: Required time features (DayIndex, tod_bin) missing.")
-
     tau_on = float(controller.tau_on)
     tau_off = float(controller.resolved_tau_off())
 
-    df_out = df_out.sort_values([bs_col, cell_col, "DayIndex", "tod_bin"]).copy()
+    # Sort once for time-continuity
+    df_out = df_out.sort_values([bs_col, cell_col, "DayIndex", "tod_bin"])
 
-    def apply_group(g: pd.DataFrame) -> pd.DataFrame:
+    # Fast logic operating on numpy arrays
+    def fast_hysteresis_vec(p_vals, t_on, t_off):
+        n = len(p_vals)
+        states = np.empty(n, dtype=object)
         prev = "FULL"
-        out_states: list[str] = []
-        pvals = pd.to_numeric(g["p_sleep_on"], errors="coerce").to_numpy()
+        for i in range(n):
+            p = p_vals[i]
+            if np.isnan(p):
+                states[i] = prev
+                continue
+            
+            if prev == "FULL":
+                curr = "ECO" if p >= t_on else "FULL"
+            else: # prev == "ECO"
+                curr = "FULL" if p <= t_off else "ECO"
+            
+            states[i] = curr
+            prev = curr
+        return states
 
-        for pv in pvals:
-            s = decide_state_prob_hysteresis(float(pv) if not np.isnan(pv) else np.nan, prev, tau_on, tau_off)
-            out_states.append(s)
-            prev = s
-
-        g = g.copy()
-        g["State"] = out_states
-        return g
-
-    df_out = (
-        df_out.groupby([bs_col, cell_col, "DayIndex"], dropna=False, group_keys=False)
-        .apply(apply_group)
+    # Apply the logic efficiently
+    df_out["State"] = (
+        df_out.groupby([bs_col, cell_col, "DayIndex"], sort=False)["p_sleep_on"]
+        .transform(lambda x: fast_hysteresis_vec(x.to_numpy(), tau_on, tau_off))
     )
 
-    # Energy simulation
-    rru = pd.to_numeric(df_out[rru_col], errors="coerce").fillna(0.0)
-    df_out["baseline_Wh"] = rru * DT_HOURS
-    is_eco = df_out["State"].astype(str).eq("ECO")
-    df_out["eco_saved_Wh"] = (float(alpha) * rru * DT_HOURS) * is_eco.astype(float)
+    # Vectorized energy math
+    rru_vec = pd.to_numeric(df_out[rru_col], errors="coerce").fillna(0.0).to_numpy()
+    df_out["baseline_Wh"] = rru_vec * DT_HOURS
+    is_eco = (df_out["State"].to_numpy() == "ECO").astype(float)
+    df_out["eco_saved_Wh"] = (float(alpha) * df_out["baseline_Wh"].to_numpy()) * is_eco
     
-    # --- SCHEMA COMPATIBILITY ---
-    # Downstream UI expects these columns even if they are empty
-    if "p30" not in df_out.columns:
-        df_out["p30"] = np.nan
-    if "p70" not in df_out.columns:
-        df_out["p70"] = np.nan
+    # UI Schema compatibility
+    if "p30" not in df_out.columns: df_out["p30"] = np.nan
+    if "p70" not in df_out.columns: df_out["p70"] = np.nan
     
     return df_out
 

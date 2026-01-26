@@ -86,14 +86,23 @@ def get_raw_df(source_path: str) -> pd.DataFrame:
     return df
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, max_entries=2) # Keep only 2 datasets in RAM
 def get_prepared_df(source_path: str) -> pd.DataFrame:
     raw = get_raw_df(source_path)
     df = prepare_5g(raw)
+    
+    # 4G files won't have sleep_on, but pipeline adds them as 0. 
+    # We validate based on what's actually there.
+    has_gt = "sleep_on" in df.columns and not df["sleep_on"].eq(0).all()
+    
+    req_cols = ["tod_bin", "DayIndex"]
+    if has_gt:
+        req_cols += ["sleep_on", "sleep_frac"]
+
     validate_schema(
         df,
         required_keys=["ts", "bs", "cell", "prb", "traffic_kb", "rru_w"],
-        required_cols=["tod_bin", "DayIndex", "sleep_on", "sleep_frac"],
+        required_cols=req_cols,
         where="cache:get_prepared_df",
     )
     return df
