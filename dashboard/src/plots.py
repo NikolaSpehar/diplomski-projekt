@@ -1,4 +1,4 @@
-#src/plots.py
+# src/plots.py
 from __future__ import annotations
 
 import altair as alt
@@ -55,6 +55,18 @@ def scatter_load_vs_sleep(bs_merged: pd.DataFrame, title: str) -> alt.Chart:
 
 
 def topn_scatter(top: pd.DataFrame, title: str) -> alt.Chart:
+    """
+    Expects (from ui_tabs):
+      - baseline_kWh, eco_saved_kWh, eco_saved_pct
+      - traffic_GiB (standardized traffic unit)
+      - p_sleep (if available)
+      - Base Station ID
+    """
+    required = {"baseline_kWh", "eco_saved_kWh", "eco_saved_pct"}
+    missing = [c for c in required if c not in top.columns]
+    if missing:
+        raise ValueError(f"topn_scatter: missing required columns: {missing}")
+
     return (
         alt.Chart(top)
         .mark_circle()
@@ -62,15 +74,15 @@ def topn_scatter(top: pd.DataFrame, title: str) -> alt.Chart:
             x=alt.X("baseline_kWh:Q", title="Baseline energy (kWh)"),
             y=alt.Y("eco_saved_pct:Q", title="Eco saved (% of baseline)"),
             size=alt.Size("eco_saved_kWh:Q", title="Eco saved (kWh)"),
-            color=alt.Color("p_sleep:Q", title="GT sleep fraction (5G)"),
+            color=alt.Color("p_sleep:Q", title="GT sleep fraction (5G)") if "p_sleep" in top.columns else alt.value(0),
             tooltip=[
                 alt.Tooltip("Base Station ID:N"),
-                alt.Tooltip("traffic_kbyte:Q", format=",.0f", title="Traffic (KByte)"),
-                alt.Tooltip("mean_prb:Q", format=".2f", title="Mean PRB (%)"),
+                alt.Tooltip("traffic_GiB:Q", format=",.3f", title="Traffic (GiB)") if "traffic_GiB" in top.columns else alt.Tooltip("traffic_kbyte:Q", format=",.0f", title="Traffic (KByte)"),
+                alt.Tooltip("mean_prb:Q", format=".2f", title="Mean PRB (%)") if "mean_prb" in top.columns else alt.value(None),
                 alt.Tooltip("baseline_kWh:Q", format=",.3f", title="Baseline (kWh)"),
                 alt.Tooltip("eco_saved_kWh:Q", format=",.3f", title="Eco saved (kWh)"),
                 alt.Tooltip("eco_saved_pct:Q", format=".2f", title="Eco saved (%)"),
-                alt.Tooltip("p_sleep:Q", format=".3f", title="GT sleep fraction"),
+                alt.Tooltip("p_sleep:Q", format=".3f", title="GT sleep fraction") if "p_sleep" in top.columns else alt.value(None),
             ],
         )
         .properties(height=420, title=title)

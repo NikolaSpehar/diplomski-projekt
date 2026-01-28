@@ -1,4 +1,4 @@
-#aggregations.py
+#src/aggregations.py
 from __future__ import annotations
 
 import numpy as np

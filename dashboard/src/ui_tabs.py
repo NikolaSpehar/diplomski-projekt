@@ -14,8 +14,71 @@ from src import plots
 from src.cache import get_bs_summary_cached, get_per_cell_kpis_cached
 
 
+# -------------------------
+# Unit helpers (standardized UI)
+# -------------------------
 def _to_kwh(x_wh: float) -> float:
     return float(x_wh) / 1000.0
+
+
+def _to_mwh(x_wh: float) -> float:
+    return float(x_wh) / 1_000_000.0
+
+
+def _traffic_kbyte_to_gib(kbyte: float) -> float:
+    # Treat "KByte" as KiB for binary-friendly telecom dataset scaling:
+    # 1 GiB = 1024 MiB = 1024*1024 KiB
+    return float(kbyte) / (1024.0 * 1024.0)
+
+
+def _format_energy_wh(wh: float) -> tuple[str, str]:
+    """
+    Returns:
+      (primary_value, unit_label)
+    Primary is kWh for moderate values, MWh for large.
+    """
+    wh = float(wh)
+    if abs(wh) >= 1_000_000.0:
+        return (f"{_to_mwh(wh):,.3f}", "MWh")
+    return (f"{_to_kwh(wh):,.3f}", "kWh")
+
+
+def _format_traffic_kbyte(kbyte: float) -> tuple[str, str]:
+    """
+    Returns:
+      (primary_value, unit_label)
+    Primary is GiB for moderate values, TiB for large.
+    """
+    gib = _traffic_kbyte_to_gib(float(kbyte))
+    if abs(gib) >= 1024.0:
+        tib = gib / 1024.0
+        return (f"{tib:,.3f}", "TiB")
+    return (f"{gib:,.3f}", "GiB")
+
+
+def metric_html(col, label: str, value: str, unit: str | None = None, *, subtitle: str | None = None) -> None:
+    """
+    A metric-like block that DOES NOT truncate long numbers (avoids Streamlit metric ellipsis).
+    """
+    unit_html = f'<span style="font-size:1.0rem; font-weight:600; opacity:0.75;"> {unit}</span>' if unit else ""
+    subtitle_html = (
+        f'<div style="font-size:0.85rem; color: rgba(49,51,63,0.65); margin-top:0.15rem;">{subtitle}</div>'
+        if subtitle
+        else ""
+    )
+    col.markdown(
+        f"""
+        <div style="padding:0.15rem 0.05rem;">
+          <div style="font-size:0.9rem; color: rgba(49,51,63,0.70);">{label}</div>
+          <div style="font-size:1.65rem; font-weight:750; line-height:1.15;
+                      overflow-wrap:anywhere; word-break:break-word;">
+            {value}{unit_html}
+          </div>
+          {subtitle_html}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def _eco_vs_gt_metrics_bs(df_view: pd.DataFrame) -> dict:
@@ -67,16 +130,26 @@ def render_tab_overview(
     total_cells = int(df_view[cell_col].nunique())
     total_traffic_kbyte = float(pd.to_numeric(df_view[traffic_col], errors="coerce").sum(skipna=True))
 
-    total_baseline_kwh = _to_kwh(float(pd.to_numeric(df_view["baseline_Wh"], errors="coerce").sum(skipna=True)))
-    total_saved_kwh = _to_kwh(float(pd.to_numeric(df_view["eco_saved_Wh"], errors="coerce").sum(skipna=True)))
-    total_saved_pct = (100.0 * total_saved_kwh / total_baseline_kwh) if total_baseline_kwh > 0 else 0.0
+    total_baseline_wh = float(pd.to_numeric(df_view["baseline_Wh"], errors="coerce").sum(skipna=True))
+    total_saved_wh = float(pd.to_numeric(df_view["eco_saved_Wh"], errors="coerce").sum(skipna=True))
+
+    # Standardized formatted values
+    traffic_val, traffic_unit = _format_traffic_kbyte(total_traffic_kbyte)
+    base_val, base_unit = _format_energy_wh(total_baseline_wh)
+    save_val, save_unit = _format_energy_wh(total_saved_wh)
+
+    # Percent should be computed in the same base unit (Wh cancels out)
+    total_saved_pct = (100.0 * total_saved_wh / total_baseline_wh) if total_baseline_wh > 0 else 0.0
 
     c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Base Stations", total_bs)
-    c2.metric("Cells", total_cells)
-    c3.metric("Total Traffic (KByte)", f"{total_traffic_kbyte:,.0f}")
-    c4.metric("Baseline energy (kWh)", f"{total_baseline_kwh:,.3f}")
-    c5.metric("Eco saved (kWh)", f"{total_saved_kwh:,.3f} ({total_saved_pct:.2f}%)")
+    # IDs are safe in st.metric
+    c1.metric("Base Stations", f"{total_bs:,}")
+    c2.metric("Cells", f"{total_cells:,}")
+
+    # Use non-truncating metric blocks for large values
+    metric_html(c3, "Total Traffic", traffic_val, traffic_unit, subtitle="Sum over selected window")
+    metric_html(c4, "Baseline Energy", base_val, base_unit, subtitle="Sum over selected window")
+    metric_html(c5, "Eco Saved", save_val, save_unit, subtitle=f"{total_saved_pct:.2f}% of baseline")
 
     json_summary = {
         "dataset": dataset,
@@ -84,24 +157,30 @@ def render_tab_overview(
         "window": window_label,
         "base_stations": total_bs,
         "cells": total_cells,
-        "total_traffic_kbyte": total_traffic_kbyte,
-        "energy_kwh": {
-            "baseline_kwh": total_baseline_kwh,
-            "eco_saved_kwh": total_saved_kwh,
-            "eco_saved_pct": total_saved_pct,
+        "traffic": {
+            "total_kbyte": float(total_traffic_kbyte),
+            "display": {"value": traffic_val, "unit": traffic_unit},
+        },
+        "energy": {
+            "baseline_wh": float(total_baseline_wh),
+            "eco_saved_wh": float(total_saved_wh),
+            "eco_saved_pct": float(total_saved_pct),
+            "display": {
+                "baseline": {"value": base_val, "unit": base_unit},
+                "eco_saved": {"value": save_val, "unit": save_unit},
+            },
         },
         "controller": {
             "type": controller_type,
             "alpha": float(alpha),
-        }
+        },
     }
 
     if controller_type == "Heuristic":
-        # --- BS mean PRB
         prb_col = resolve_col(df_view, "prb")
         bs_mean = bs_mean_prb(df_view)
 
-        # --- Thresholds for interpretability on BS mean
+        # Thresholds for interpretability on BS mean
         if threshold_scope == "Global":
             p30 = pd.to_numeric(df_view["p30"], errors="coerce").dropna() if "p30" in df_view.columns else pd.Series(dtype=float)
             p70 = pd.to_numeric(df_view["p70"], errors="coerce").dropna() if "p70" in df_view.columns else pd.Series(dtype=float)
@@ -166,7 +245,6 @@ def render_tab_overview(
         m4.metric("TN (!ECO & !GT)", gt_proxy["tn"])
         json_summary["eco_vs_gt_sleep_bs_level"] = gt_proxy
 
-    # Optional: show probability summary if present
     if "p_sleep_on" in df_view.columns:
         p = pd.to_numeric(df_view["p_sleep_on"], errors="coerce").dropna()
         if len(p):
@@ -229,6 +307,10 @@ def render_tab_topn(
     bs_col = resolve_col(summary, "bs")
 
     summary = summary.copy()
+
+    # Standardized derived columns for UI
+    summary["traffic_GiB"] = summary["traffic_kbyte"].map(_traffic_kbyte_to_gib)
+
     summary["baseline_kWh"] = summary["baseline_Wh"].map(_to_kwh)
     summary["eco_saved_kWh"] = summary["eco_saved_Wh"].map(_to_kwh)
 
@@ -237,7 +319,7 @@ def render_tab_topn(
     with c1:
         top_n = st.slider("Select N", 5, 50, 10)
     with c2:
-        options = ["eco_saved_kWh", "eco_saved_pct", "baseline_kWh", "traffic_kbyte"]
+        options = ["eco_saved_kWh", "eco_saved_pct", "baseline_kWh", "traffic_GiB"]
         if show_gt_metrics:
             options.append("p_sleep")
         rank_by = st.selectbox("Rank by", options, index=0)
@@ -251,7 +333,7 @@ def render_tab_topn(
     display_cols = [
         "rank",
         bs_col,
-        "traffic_kbyte",
+        "traffic_GiB",
         "mean_prb",
         "baseline_kWh",
         "eco_saved_kWh",
@@ -263,7 +345,7 @@ def render_tab_topn(
     top_disp = top[display_cols].rename(
         columns={
             bs_col: "Base Station ID",
-            "traffic_kbyte": "traffic (KByte)",
+            "traffic_GiB": "traffic (GiB)",
             "mean_prb": "mean PRB (%)",
             "baseline_kWh": "baseline energy (kWh)",
             "eco_saved_kWh": "eco saved (kWh)",
@@ -273,7 +355,7 @@ def render_tab_topn(
     )
 
     fmt = {
-        "traffic (KByte)": "{:,.0f}",
+        "traffic (GiB)": "{:,.3f}",
         "mean PRB (%)": "{:.2f}",
         "baseline energy (kWh)": "{:,.3f}",
         "eco saved (kWh)": "{:,.3f}",
@@ -290,8 +372,12 @@ def render_tab_topn(
     st.dataframe(styler, use_container_width=True)
 
     st.markdown("### B) Impact–feasibility scatter (Top-N)")
+
+    # Align plot columns with standardized units expected by plots.topn_scatter
     plot_top = top.rename(columns={bs_col: "Base Station ID"}).copy()
-    
+    if "traffic_GiB" not in plot_top.columns:
+        plot_top["traffic_GiB"] = plot_top["traffic_kbyte"].map(_traffic_kbyte_to_gib)
+
     # If no GT, fill p_sleep with 0 for plot compatibility (it won't be informative but won't crash)
     if not show_gt_metrics and "p_sleep" not in plot_top.columns:
         plot_top["p_sleep"] = 0.0
@@ -344,14 +430,20 @@ def render_tab_drilldown(
     cell_kpi["eco_saved_kWh"] = cell_kpi["eco_saved_Wh"].map(_to_kwh)
 
     st.markdown("### Per-cell KPIs")
-    
-    # Hide GT columns if irrelevant
+
     disp_cols = list(cell_kpi.columns)
+
+    # Hide GT columns if irrelevant
     if not show_gt_metrics:
-        # These are generated by per_cell_kpis, but are 0 in 4G
         cols_to_hide = ["p_sleep", "f_sleep", "n_bouts", "bouts_per_day", "mean_bout_intervals", "mean_bout_minutes"]
         disp_cols = [c for c in disp_cols if c not in cols_to_hide]
-    
+
+    # Prefer standardized energy columns in display (kWh), keep Wh hidden
+    # (If you still want Wh, remove these two lines.)
+    for col_hide in ["baseline_Wh", "eco_saved_Wh"]:
+        if col_hide in disp_cols:
+            disp_cols.remove(col_hide)
+
     st.dataframe(cell_kpi[disp_cols], use_container_width=True)
 
     left, right = st.columns(2)
@@ -372,14 +464,17 @@ def render_tab_drilldown(
         chart = plots.cell_eco_savings_bar(sav, title="Economy Mode savings by cell")
         st.altair_chart(chart.properties(height=min(520, 22 * len(sav) + 120)), use_container_width=True)
 
-    baseline_total_kwh = float(pd.to_numeric(df_bs["baseline_Wh"], errors="coerce").sum(skipna=True)) / 1000.0
-    eco_saved_total_kwh = float(pd.to_numeric(df_bs["eco_saved_Wh"], errors="coerce").sum(skipna=True)) / 1000.0
-    eco_saved_pct = (100.0 * eco_saved_total_kwh / baseline_total_kwh) if baseline_total_kwh > 0 else 0.0
+    baseline_total_wh = float(pd.to_numeric(df_bs["baseline_Wh"], errors="coerce").sum(skipna=True))
+    eco_saved_total_wh = float(pd.to_numeric(df_bs["eco_saved_Wh"], errors="coerce").sum(skipna=True))
+
+    base_val, base_unit = _format_energy_wh(baseline_total_wh)
+    save_val, save_unit = _format_energy_wh(eco_saved_total_wh)
+    eco_saved_pct = (100.0 * eco_saved_total_wh / baseline_total_wh) if baseline_total_wh > 0 else 0.0
 
     st.markdown("### Selected Base Station Summary")
     s1, s2, s3 = st.columns(3)
-    s1.metric("Baseline energy (kWh)", f"{baseline_total_kwh:,.3f}")
-    s2.metric("Eco saved (kWh)", f"{eco_saved_total_kwh:,.3f}")
+    metric_html(s1, "Baseline Energy", base_val, base_unit)
+    metric_html(s2, "Eco Saved", save_val, save_unit)
     s3.metric("Eco saved (% baseline)", f"{eco_saved_pct:.2f}%")
 
 
@@ -466,6 +561,7 @@ def render_tab_heterogeneity(
     bs_kpi = bs_kpi.copy()
     bs_kpi["baseline_kWh"] = bs_kpi["baseline_Wh"].map(_to_kwh)
     bs_kpi["eco_saved_kWh"] = bs_kpi["eco_saved_Wh"].map(_to_kwh)
+    bs_kpi["traffic_GiB"] = bs_kpi["traffic_kbyte"].map(_traffic_kbyte_to_gib)
 
     def _cv(series: pd.Series) -> float:
         s = pd.to_numeric(series, errors="coerce").dropna()
@@ -481,7 +577,7 @@ def render_tab_heterogeneity(
     c4.metric("CV(eco_saved_kWh) across BS", f"{_cv(bs_kpi['eco_saved_kWh']):.3f}")
 
     st.markdown("### A) Per-cell heterogeneity")
-    
+
     a1, a2 = st.columns(2)
     with a1:
         if show_gt_metrics:
@@ -490,7 +586,7 @@ def render_tab_heterogeneity(
                 use_container_width=True,
             )
         else:
-             st.altair_chart(
+            st.altair_chart(
                 plots.hist_numeric(cell_kpi, "mean_prb", "Cells: distribution of mean PRB (%)", bin_step=2.0),
                 use_container_width=True,
             )
@@ -501,8 +597,7 @@ def render_tab_heterogeneity(
                 use_container_width=True,
             )
         else:
-             # Just show placeholder or empty
-             st.info("p_sleep distribution unavailable (4G Inference).")
+            st.info("p_sleep distribution unavailable (4G Inference).")
 
     if show_gt_metrics:
         b1, b2 = st.columns(2)
@@ -552,20 +647,21 @@ def render_tab_heterogeneity(
         use_container_width=True,
     )
 
+
 def render_tab_risk_optimization(
     df_view: pd.DataFrame,
-    df_policy_full: pd.DataFrame, # Need full dataset for accurate sweep
+    df_policy_full: pd.DataFrame,  # Need full dataset for accurate sweep
     alpha: float,
     current_tau_on: float,
     current_tau_off: float,
-    prb_threshold: float = 20.0
+    prb_threshold: float = 20.0,
 ) -> None:
     from src.kpis import calculate_risk_metrics
     from src.optimization import run_pareto_sweep
     import altair as alt
 
     st.subheader("⚖️ Risk vs. Savings Optimization")
-    
+
     st.markdown(
         """
         **The Trade-off:** Aggressive energy saving (low thresholds) increases the risk of 
@@ -574,37 +670,24 @@ def render_tab_risk_optimization(
     )
 
     prb_threshold = st.slider(
-        "PRB Risk Threshold (%)", 
-        min_value=1.0, 
-        max_value=50.0, 
-        value=20.0, 
+        "PRB Risk Threshold (%)",
+        min_value=1.0,
+        max_value=50.0,
+        value=20.0,
         step=1.0,
-        help="The load level above which Economy Mode is considered a performance risk."
+        help="The load level above which Economy Mode is considered a performance risk.",
     )
 
     # 1. Current Risk Status
     st.markdown("#### 1. Current Risk Profile")
     risk_metrics = calculate_risk_metrics(df_view, prb_threshold=prb_threshold)
-    
-    c1, c2, c3 = st.columns(3)
-    c1.metric(
-        "Risk Threshold (PRB)", 
-        f"> {prb_threshold}%", 
-        help="Cells with load above this value should NOT be in ECO."
-    )
-    c2.metric(
-        "High Risk Intervals", 
-        f"{risk_metrics['risk_intervals']:,}", 
-        help="Number of 30-min intervals where State=ECO and Load > Threshold"
-    )
-    c3.metric(
-        "Risk % (of Total Time)", 
-        f"{risk_metrics['risk_percent_total']:.2f}%",
-        delta_color="inverse",
-        delta=None # You could add a reference target here
-    )
 
-    if risk_metrics['risk_percent_total'] > 1.0:
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Risk Threshold (PRB)", f"> {prb_threshold}%", help="Cells with load above this value should NOT be in ECO.")
+    c2.metric("High Risk Intervals", f"{risk_metrics['risk_intervals']:,}", help="Number of 30-min intervals where State=ECO and Load > Threshold")
+    c3.metric("Risk % (of Total Time)", f"{risk_metrics['risk_percent_total']:.2f}%", delta_color="inverse", delta=None)
+
+    if risk_metrics["risk_percent_total"] > 1.0:
         st.warning(f"⚠️ High Risk detected! {risk_metrics['risk_percent_total']:.2f}% of operations coincide with high load.")
     else:
         st.success("✅ Operational Risk is within safe limits (< 1%).")
@@ -613,82 +696,38 @@ def render_tab_risk_optimization(
 
     # 2. Pareto Sweep
     st.markdown("#### 2. Optimization Sweep (Pareto Frontier)")
-    
+
     col_run, col_conf = st.columns([1, 3])
     with col_conf:
-        sweep_range = st.slider("Sweep range for τ_on", 0.5, 0.95, (0.6, 0.9))
+        sweep_range = st.slider("Sweep range for τ_on", 0.0, 1.0, (0.1, 0.9))
         fixed_hysteresis = st.slider("Fixed Hysteresis (τ_on - τ_off)", 0.0, 0.2, 0.1, 0.05)
-    
+
     with col_run:
-        st.write("") # Spacer
+        st.write("")
         run_opt = st.button("Run Optimization Sweep", type="primary")
 
     if run_opt:
-        # Prepare grid
         t_min, t_max = sweep_range
-        grid = np.linspace(t_min, t_max, 15) # 15 steps
-        
-        # Run sweep on the FULL dataset (df_policy_full) for statistical significance
-        # Make sure it has p_sleep_on
+        grid = np.linspace(t_min, t_max, 15)
+
         if "p_sleep_on" not in df_policy_full.columns:
             st.error("Cannot run optimization: 'p_sleep_on' missing from data. Ensure ML Controller is active.")
             return
 
-        res_df = run_pareto_sweep(
-            df_policy_full, 
-            alpha=alpha, 
-            tau_on_range=grid, 
-            tau_off_offset=fixed_hysteresis, 
-            prb_threshold=prb_threshold
+        # For consistent scale, sweep on df_view (selected window), not full-day.
+        res_df_view = run_pareto_sweep(
+            df_view,
+            alpha=alpha,
+            tau_on_range=grid,
+            tau_off_offset=fixed_hysteresis,
+            prb_threshold=prb_threshold,
         )
-        
-        # Plot
-        base = alt.Chart(res_df).encode(
+
+        base_view = alt.Chart(res_df_view).encode(
             tooltip=[
                 alt.Tooltip("tau_on", format=".2f"),
                 alt.Tooltip("saved_kwh", format=".1f"),
                 alt.Tooltip("risk_pct", format=".2f"),
-                alt.Tooltip("eco_coverage_pct", format=".1f", title="Eco Coverage %")
-            ]
-        )
-
-        scatter = base.mark_circle(size=100).encode(
-            x=alt.X("risk_pct:Q", title="Risk % (Load > Threshold in ECO)"),
-            y=alt.Y("saved_kwh:Q", title="Total Energy Saved (kWh)"),
-            color=alt.Color("tau_on:Q", scale=alt.Scale(scheme="viridis"), title="Tau On"),
-        )
-
-        line = base.mark_line(color="gray", strokeDash=[5, 5]).encode(
-            x="risk_pct:Q",
-            y="saved_kwh:Q"
-        )
-        
-        # Highlight current setting if within range
-        curr_point = pd.DataFrame({
-            "risk_pct": [risk_metrics["risk_percent_total"]],
-            # Note: Saved kWh in metrics is based on df_view (window), sweep is df_policy (full). 
-            # To be comparable, strictly we should sweep df_view or scale. 
-            # Let's sweep df_view for consistency in this visual.
-            "saved_kwh": [float(df_view["eco_saved_Wh"].sum() / 1000.0)],
-            "label": ["Current"]
-        })
-        
-        # If we swept FULL but plotted VIEW metrics, they mismatch.
-        # FIX: Let's run the sweep on `df_view` so the chart scales match the current view.
-        res_df_view = run_pareto_sweep(
-            df_view, 
-            alpha=alpha, 
-            tau_on_range=grid, 
-            tau_off_offset=fixed_hysteresis, 
-            prb_threshold=prb_threshold
-        )
-        
-        # Re-plot using View Data
-        base_view = alt.Chart(res_df_view).encode(
-             tooltip=[
-                alt.Tooltip("tau_on", format=".2f"),
-                alt.Tooltip("saved_kwh", format=".1f"),
-                alt.Tooltip("risk_pct", format=".2f")
             ]
         )
         scatter_view = base_view.mark_circle(size=100).encode(
@@ -696,16 +735,22 @@ def render_tab_risk_optimization(
             y=alt.Y("saved_kwh:Q", title="Energy Saved (kWh) - Selected Window"),
             color=alt.Color("tau_on:Q", scale=alt.Scale(scheme="viridis"), title="Tau On"),
         )
-        
+
+        curr_point = pd.DataFrame(
+            {
+                "risk_pct": [risk_metrics["risk_percent_total"]],
+                "saved_kwh": [float(df_view["eco_saved_Wh"].sum() / 1000.0)],
+                "label": ["Current"],
+            }
+        )
         curr_mark = alt.Chart(curr_point).mark_point(shape="diamond", size=200, color="red").encode(
             x="risk_pct:Q",
             y="saved_kwh:Q",
-            tooltip=[alt.Tooltip("label")]
+            tooltip=[alt.Tooltip("label")],
         )
 
         st.altair_chart((scatter_view + curr_mark).interactive(), use_container_width=True)
-        
-        # Recommendation table
+
         best_safe = res_df_view[res_df_view["risk_pct"] <= 1.0].sort_values("saved_kwh", ascending=False).head(1)
         if not best_safe.empty:
             rec = best_safe.iloc[0]
@@ -713,64 +758,83 @@ def render_tab_risk_optimization(
         else:
             st.warning("No configuration found with Risk < 1%. Consider raising thresholds.")
 
-# src/ui_tabs.py
 
 def render_tab_distribution_check(df_view: pd.DataFrame, path_5g_train: str):
+    """
+    Drift detection with standardized display units:
+      - PRB: %
+      - Users: count
+      - Traffic: GiB (derived from KByte)
+    """
     from src.cache import get_prepared_df
     from src.config import resolve_col
     import altair as alt
-    
+
     st.subheader("📊 Feature Distribution Shift Detection")
     st.info("Comparing the current dataset features against the 5G Training baseline (weekday).")
 
-    # Load 5G Training baseline for comparison
     df_ref = get_prepared_df(path_5g_train)
-    
-    # Resolve canonical column names to ensure compatibility
-    cols_map = {
-        "PRB Load": resolve_col(df_view, "prb"),
-        "Number of Users": resolve_col(df_view, "users"),
-        "Traffic (KB)": resolve_col(df_view, "traffic_kb")
-    }
-    
-    selected_label = st.selectbox("Select feature to compare", list(cols_map.keys()))
-    col_name = cols_map[selected_label]
 
-    # Prepare data for plotting
-    df_ref_plot = df_ref[[col_name]].sample(n=min(5000, len(df_ref))).copy()
+    prb_col = resolve_col(df_view, "prb")
+    users_col = resolve_col(df_view, "users")
+    traffic_col = resolve_col(df_view, "traffic_kb")
+
+    def _make_feature(df: pd.DataFrame, key: str) -> tuple[pd.Series, str]:
+        if key == "PRB Load":
+            return (pd.to_numeric(df[prb_col], errors="coerce"), "PRB Usage Ratio (%)")
+        if key == "Number of Users":
+            return (pd.to_numeric(df[users_col], errors="coerce"), "Users (count)")
+        if key == "Traffic":
+            kb = pd.to_numeric(df[traffic_col], errors="coerce")
+            gib = kb.map(_traffic_kbyte_to_gib)
+            return (gib, "Traffic (GiB)")
+        raise ValueError(f"Unknown feature key: {key}")
+
+    feature_key = st.selectbox("Select feature to compare", ["PRB Load", "Number of Users", "Traffic"])
+
+    ref_s, x_label = _make_feature(df_ref, feature_key)
+    cur_s, _ = _make_feature(df_view, feature_key)
+
+    df_ref_plot = pd.DataFrame({x_label: ref_s}).dropna().sample(n=min(5000, int(ref_s.dropna().shape[0]) if hasattr(ref_s, "shape") else 0), random_state=0) if len(ref_s.dropna()) else pd.DataFrame({x_label: []})
     df_ref_plot["Dataset"] = "5G Training (Ref)"
 
-    df_curr_plot = df_view[[col_name]].sample(n=min(5000, len(df_view))).copy()
+    df_curr_plot = pd.DataFrame({x_label: cur_s}).dropna().sample(n=min(5000, int(cur_s.dropna().shape[0]) if hasattr(cur_s, "shape") else 0), random_state=0) if len(cur_s.dropna()) else pd.DataFrame({x_label: []})
     df_curr_plot["Dataset"] = "Current Dataset (View)"
-    
-    plot_df = pd.concat([df_ref_plot, df_curr_plot], axis=0)
 
-    # Render overlaid histograms
-    # We use step=None to let Altair decide bins, or specify bin=alt.Bin(maxbins=40)
-    hist = alt.Chart(plot_df).mark_bar(opacity=0.5).encode(
-        alt.X(f"{col_name}:Q", bin=alt.Bin(maxbins=40), title=selected_label),
-        alt.Y("count()", stack=None, title="Frequency"),
-        alt.Color("Dataset:N", scale=alt.Scale(domain=["5G Training (Ref)", "Current Dataset (View)"], range=["#4682b4", "#ef553b"]))
-    ).properties(height=400).interactive()
+    plot_df = pd.concat([df_ref_plot, df_curr_plot], axis=0, ignore_index=True)
+
+    hist = (
+        alt.Chart(plot_df)
+        .mark_bar(opacity=0.5)
+        .encode(
+            alt.X(f"{x_label}:Q", bin=alt.Bin(maxbins=40), title=x_label),
+            alt.Y("count()", stack=None, title="Frequency"),
+            alt.Color("Dataset:N"),
+            tooltip=[alt.Tooltip("Dataset:N"), alt.Tooltip("count():Q", title="Count")],
+        )
+        .properties(height=400)
+        .interactive()
+    )
 
     st.altair_chart(hist, use_container_width=True)
 
-    # Statistical Summary
     st.markdown("#### Statistical Comparison")
-    stats = pd.DataFrame({
-        "Metric": ["Mean", "Std Dev", "Min", "Max"],
-        "5G Training": [
-            df_ref[col_name].mean(), 
-            df_ref[col_name].std(), 
-            df_ref[col_name].min(), 
-            df_ref[col_name].max()
-        ],
-        "Current (4G/5G Evaluation)": [
-            df_view[col_name].mean(), 
-            df_view[col_name].std(), 
-            df_view[col_name].min(), 
-            df_view[col_name].max()
-        ]
-    }).set_index("Metric")
-    
-    st.table(stats.style.format("{:.2f}"))
+    stats = pd.DataFrame(
+        {
+            "Metric": ["Mean", "Std Dev", "Min", "Max"],
+            "5G Training": [
+                float(ref_s.mean(skipna=True)) if len(ref_s.dropna()) else np.nan,
+                float(ref_s.std(skipna=True)) if len(ref_s.dropna()) else np.nan,
+                float(ref_s.min(skipna=True)) if len(ref_s.dropna()) else np.nan,
+                float(ref_s.max(skipna=True)) if len(ref_s.dropna()) else np.nan,
+            ],
+            "Current (4G/5G Evaluation)": [
+                float(cur_s.mean(skipna=True)) if len(cur_s.dropna()) else np.nan,
+                float(cur_s.std(skipna=True)) if len(cur_s.dropna()) else np.nan,
+                float(cur_s.min(skipna=True)) if len(cur_s.dropna()) else np.nan,
+                float(cur_s.max(skipna=True)) if len(cur_s.dropna()) else np.nan,
+            ],
+        }
+    ).set_index("Metric")
+
+    st.table(stats.style.format("{:.3f}"))
