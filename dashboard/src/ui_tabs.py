@@ -202,7 +202,7 @@ def render_tab_overview(
         dist = state_distribution(bs_mean["State"])
         st.altair_chart(
             plots.bar_state_distribution(dist, title="Base Station State Distribution (heuristic)"),
-            use_container_width=True,
+            width='stretch',
         )
 
         if show_gt_metrics:
@@ -218,7 +218,7 @@ def render_tab_overview(
             merged = bs_mean.merge(sleep_by_bs, on=bs_col, how="left")
             st.altair_chart(
                 plots.scatter_load_vs_sleep(merged, title="Load vs GT deep sleep (per Base Station)"),
-                use_container_width=True,
+                width='stretch',
             )
             json_summary["heuristic_vs_gt_bs_level"] = gt_metrics
 
@@ -232,7 +232,7 @@ def render_tab_overview(
     dist_rows = state_distribution(df_view["State"].astype(str))
     st.altair_chart(
         plots.bar_state_distribution(dist_rows, title="Row-level State Distribution (ML controller)"),
-        use_container_width=True,
+        width='stretch',
     )
 
     if show_gt_metrics:
@@ -369,7 +369,7 @@ def render_tab_topn(
         .bar(subset=["eco saved (kWh)"], align="zero")
         .bar(subset=["eco saved (%)"], vmin=0, vmax=max(1e-9, float(top_disp["eco saved (%)"].max())))
     )
-    st.dataframe(styler, use_container_width=True)
+    st.dataframe(styler, width='stretch')
 
     st.markdown("### B) Impact–feasibility scatter (Top-N)")
 
@@ -384,7 +384,7 @@ def render_tab_topn(
 
     st.altair_chart(
         plots.topn_scatter(plot_top, title="Top-N: savings impact vs savings intensity"),
-        use_container_width=True,
+        width='stretch',
     )
 
 
@@ -444,7 +444,7 @@ def render_tab_drilldown(
         if col_hide in disp_cols:
             disp_cols.remove(col_hide)
 
-    st.dataframe(cell_kpi[disp_cols], use_container_width=True)
+    st.dataframe(cell_kpi[disp_cols], width='stretch')
 
     left, right = st.columns(2)
 
@@ -454,7 +454,7 @@ def render_tab_drilldown(
             gt_sleep = gt_sleep.rename(columns={"p_sleep": "P(sleep_on)", "f_sleep": "Sleep time fraction"})
             gt_melt = gt_sleep.melt(id_vars=["Cell ID"], var_name="Metric", value_name="Value")
             chart = plots.cell_gt_sleep_bar(gt_melt, title="Ground-truth deep sleep metrics by cell")
-            st.altair_chart(chart.properties(height=min(520, 22 * len(gt_sleep) + 120)), use_container_width=True)
+            st.altair_chart(chart.properties(height=min(520, 22 * len(gt_sleep) + 120)), width='stretch')
         else:
             st.info("Ground-truth sleep metrics unavailable (4G Inference).")
 
@@ -462,7 +462,7 @@ def render_tab_drilldown(
         sav = cell_kpi[["Cell ID", "eco_saved_pct_of_baseline", "eco_saved_kWh"]].copy()
         sav = sav.sort_values("eco_saved_kWh", ascending=False)
         chart = plots.cell_eco_savings_bar(sav, title="Economy Mode savings by cell")
-        st.altair_chart(chart.properties(height=min(520, 22 * len(sav) + 120)), use_container_width=True)
+        st.altair_chart(chart.properties(height=min(520, 22 * len(sav) + 120)), width='stretch')
 
     baseline_total_wh = float(pd.to_numeric(df_bs["baseline_Wh"], errors="coerce").sum(skipna=True))
     eco_saved_total_wh = float(pd.to_numeric(df_bs["eco_saved_Wh"], errors="coerce").sum(skipna=True))
@@ -583,18 +583,18 @@ def render_tab_heterogeneity(
         if show_gt_metrics:
             st.altair_chart(
                 plots.hist_numeric(cell_kpi, "p_sleep", "Cells: distribution of P(sleep_on)", bin_step=0.05),
-                use_container_width=True,
+                width='stretch',
             )
         else:
             st.altair_chart(
                 plots.hist_numeric(cell_kpi, "mean_prb", "Cells: distribution of mean PRB (%)", bin_step=2.0),
-                use_container_width=True,
+                width='stretch',
             )
     with a2:
         if show_gt_metrics:
             st.altair_chart(
                 plots.hist_numeric(cell_kpi, "mean_prb", "Cells: distribution of mean PRB (%)", bin_step=2.0),
-                use_container_width=True,
+                width='stretch',
             )
         else:
             st.info("p_sleep distribution unavailable (4G Inference).")
@@ -604,12 +604,12 @@ def render_tab_heterogeneity(
         with b1:
             st.altair_chart(
                 plots.hist_numeric(cell_kpi, "mean_bout_minutes", "Cells: mean deep-sleep bout duration (minutes)", bin_step=15.0),
-                use_container_width=True,
+                width='stretch',
             )
         with b2:
             st.altair_chart(
                 plots.hist_numeric(cell_kpi, "bouts_per_day", "Cells: deep-sleep bouts per day", bin_step=0.5),
-                use_container_width=True,
+                width='stretch',
             )
 
         st.altair_chart(
@@ -620,7 +620,7 @@ def render_tab_heterogeneity(
                 title="Cells: mean PRB vs P(sleep_on) (downsampled if large)",
                 tooltip_cols=["Base Station ID", "Cell ID"],
             ),
-            use_container_width=True,
+            width='stretch',
         )
 
     st.markdown("### B) Per-base-station heterogeneity")
@@ -628,12 +628,12 @@ def render_tab_heterogeneity(
     with d1:
         st.altair_chart(
             plots.hist_numeric(bs_kpi, "eco_saved_kWh", "Base Stations: distribution of eco saved (kWh)", bin_step=None),
-            use_container_width=True,
+            width='stretch',
         )
     with d2:
         st.altair_chart(
             plots.hist_numeric(bs_kpi, "eco_saved_pct", "Base Stations: distribution of eco saved (%)", bin_step=1.0),
-            use_container_width=True,
+            width='stretch',
         )
 
     st.altair_chart(
@@ -644,7 +644,7 @@ def render_tab_heterogeneity(
             title="Base Stations: mean PRB vs eco saved (%) (downsampled if large)",
             tooltip_cols=["Base Station ID"],
         ),
-        use_container_width=True,
+        width='stretch',
     )
 
 
@@ -749,7 +749,7 @@ def render_tab_risk_optimization(
             tooltip=[alt.Tooltip("label")],
         )
 
-        st.altair_chart((scatter_view + curr_mark).interactive(), use_container_width=True)
+        st.altair_chart((scatter_view + curr_mark).interactive(), width='stretch')
 
         best_safe = res_df_view[res_df_view["risk_pct"] <= 1.0].sort_values("saved_kwh", ascending=False).head(1)
         if not best_safe.empty:
@@ -816,7 +816,7 @@ def render_tab_distribution_check(df_view: pd.DataFrame, path_5g_train: str):
         .interactive()
     )
 
-    st.altair_chart(hist, use_container_width=True)
+    st.altair_chart(hist, width='stretch')
 
     st.markdown("#### Statistical Comparison")
     stats = pd.DataFrame(
