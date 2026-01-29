@@ -60,7 +60,7 @@ def per_cell_kpis(df: pd.DataFrame) -> pd.DataFrame:
             "eco_saved_pct_of_baseline": (100.0 * saved / baseline) if baseline > 0 else 0.0,
         })
 
-    out = g.groupby(keys, dropna=False).apply(agg).reset_index()
+    out = g.groupby(keys, dropna=False).apply(agg, include_groups=False).reset_index()
 
     # Canonicalize for UI friendliness
     out = out.rename(columns={bs_col: "Base Station ID", cell_col: "Cell ID"})
