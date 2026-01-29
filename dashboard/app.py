@@ -1,6 +1,9 @@
 # app.py
 from __future__ import annotations
 
+import warnings
+warnings.filterwarnings('ignore', category=RuntimeWarning, module='pandas.io.formats.style')
+
 import streamlit as st
 from pathlib import Path
 
