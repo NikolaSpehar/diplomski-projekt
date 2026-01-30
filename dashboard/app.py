@@ -118,8 +118,7 @@ with st.sidebar.form("controls_form", clear_on_submit=False):
     st.select_slider(
         "Time of day (30-min bins)",
         options=tod_order,
-        value=st.session_state["tod"],
-        key="tod",
+        key="tod", 
     )
     tod_bin = tod_order.index(st.session_state["tod"])
 
