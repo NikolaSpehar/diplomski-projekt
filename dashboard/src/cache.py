@@ -18,8 +18,9 @@ from src.kpis import per_cell_kpis
 
 from src.controller_ml import (
     load_model as load_ml_model,
-    apply_ml_controller_and_simulation,
+    apply_simulation_only,
     MLControllerSpec,
+    predict_p_sleep_on,
 )
 from src.ml.features_shared import FeatureSpec
 
@@ -86,15 +87,14 @@ def get_raw_df(source_path: str) -> pd.DataFrame:
     return df
 
 
-@st.cache_data(show_spinner=False, max_entries=2) # Keep only 2 datasets in RAM
+@st.cache_data(show_spinner=False, max_entries=2)  # Keep only 2 datasets in RAM
 def get_prepared_df(source_path: str) -> pd.DataFrame:
     raw = get_raw_df(source_path)
     df = prepare_5g(raw)
-    
-    # 4G files won't have sleep_on, but pipeline adds them as 0. 
-    # We validate based on what's actually there.
+
+    # 4G files won't have sleep_on, but pipeline adds them as 0.
     has_gt = "sleep_on" in df.columns and not df["sleep_on"].eq(0).all()
-    
+
     req_cols = ["tod_bin", "DayIndex"]
     if has_gt:
         req_cols += ["sleep_on", "sleep_frac"]
@@ -130,7 +130,52 @@ def get_ml_model_cached(model_path: str):
     return load_ml_model(model_path)
 
 
-@st.cache_data(show_spinner=False)
+# -------------------------
+# NEW: cache only probabilities (expensive part), bounded cache
+# -------------------------
+@st.cache_data(show_spinner=False, max_entries=2, ttl=3600)
+def get_probs_df_cached(
+    source_path: str,
+    *,
+    ml_model_path: str,
+    ml_use_energy_features: bool,
+    ml_use_prev_features: bool,
+    ml_use_time_features: bool,
+    ml_use_time_cyclical: bool,
+) -> pd.DataFrame:
+    """
+    Compute p_sleep_on once per dataset + model + feature spec.
+
+    This isolates the heavy inference step from tau tuning
+    (tau changes become cheap: apply_simulation_only only).
+    """
+    df = get_prepared_df(source_path)
+
+    model = get_ml_model_cached(ml_model_path)
+    fsp = FeatureSpec(
+        use_energy_features=bool(ml_use_energy_features),
+        use_prev_features=bool(ml_use_prev_features),
+        use_time_features=bool(ml_use_time_features),
+        use_time_cyclical=bool(ml_use_time_cyclical),
+    )
+
+    p = predict_p_sleep_on(df, model=model, feature_spec=fsp)
+    out = df.copy()
+    out["p_sleep_on"] = p
+
+    # Provide placeholders for UI schema compatibility (some tabs expect these)
+    if "p30" not in out.columns:
+        out["p30"] = pd.NA
+    if "p70" not in out.columns:
+        out["p70"] = pd.NA
+
+    return out
+
+
+# -------------------------
+# POLICY DF (bounded cache!)
+# -------------------------
+@st.cache_data(show_spinner=False, max_entries=2, ttl=3600)
 def get_policy_df(
     source_path: str,
     *,
@@ -176,23 +221,25 @@ def get_policy_df(
         return out
 
     if controller_type == "ML":
-        model = get_ml_model_cached(ml_model_path)
-        fsp = FeatureSpec(
-            use_energy_features=bool(ml_use_energy_features),
-            use_prev_features=bool(ml_use_prev_features),
-            use_time_features=bool(ml_use_time_features),
-            use_time_cyclical=bool(ml_use_time_cyclical),
+        # Heavy part cached separately (probs)
+        df_probs = get_probs_df_cached(
+            source_path,
+            ml_model_path=ml_model_path,
+            ml_use_energy_features=bool(ml_use_energy_features),
+            ml_use_prev_features=bool(ml_use_prev_features),
+            ml_use_time_features=bool(ml_use_time_features),
+            ml_use_time_cyclical=bool(ml_use_time_cyclical),
         )
+
         ctrl = MLControllerSpec(
             tau_on=float(ml_tau_on),
             tau_off=float(ml_tau_off),
             hysteresis_enabled=bool(ml_hysteresis_enabled),
         )
 
-        out = apply_ml_controller_and_simulation(
-            df,
-            model=model,
-            feature_spec=fsp,
+        # Cheap part: hysteresis + energy only
+        out = apply_simulation_only(
+            df_probs,
             controller=ctrl,
             alpha=alpha,
         )
@@ -208,7 +255,7 @@ def get_policy_df(
     raise ValueError(f"Unknown controller_type: {controller_type!r}. Use 'Heuristic' or 'ML'.")
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, max_entries=4, ttl=3600)
 def get_view_df(
     source_path: str,
     *,
@@ -255,7 +302,7 @@ def get_view_df(
     return df_policy
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, max_entries=8, ttl=3600)
 def get_bs_summary_cached(
     source_path: str,
     *,
@@ -298,7 +345,7 @@ def get_bs_summary_cached(
     return bs_summary(df_view)
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, max_entries=6, ttl=3600)
 def get_per_cell_kpis_cached(
     source_path: str,
     *,
