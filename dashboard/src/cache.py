@@ -4,6 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 import pandas as pd
 import streamlit as st
+import numpy as np
 
 from src.io import load_csv
 from src.config import canonicalize_columns, validate_schema, resolve_col
