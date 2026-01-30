@@ -656,107 +656,134 @@ def render_tab_risk_optimization(
     current_tau_off: float,
     prb_threshold: float = 20.0,
 ) -> None:
+    """
+    Stabilized version:
+      - Uses a form so sliders don't trigger expensive reruns while dragging.
+      - Risk metric computation is cheap now (calculate_risk_metrics optimized),
+        but this also prevents "rerun storms" on UI interaction.
+    """
     from src.kpis import calculate_risk_metrics
     from src.optimization import run_pareto_sweep
     import altair as alt
+    import numpy as np
+    import pandas as pd
+    import streamlit as st
 
     st.subheader("⚖️ Risk vs. Savings Optimization")
 
     st.markdown(
         """
-        **The Trade-off:** Aggressive energy saving (low thresholds) increases the risk of 
+        **The Trade-off:** Aggressive energy saving (low thresholds) increases the risk of
         putting active cells into ECO mode. This tool helps find the 'Sweet Spot'.
         """
     )
 
-    prb_threshold = st.slider(
-        "PRB Risk Threshold (%)",
-        min_value=1.0,
-        max_value=50.0,
-        value=20.0,
-        step=1.0,
-        help="The load level above which Economy Mode is considered a performance risk.",
-    )
+    # -------------------------
+    # FORM: prevents rerun storm while dragging sliders
+    # -------------------------
+    with st.form("risk_opt_form", clear_on_submit=False):
+        prb_threshold = st.slider(
+            "PRB Risk Threshold (%)",
+            min_value=1.0,
+            max_value=50.0,
+            value=float(prb_threshold),
+            step=1.0,
+            help="The load level above which Economy Mode is considered a performance risk.",
+        )
 
-    # 1. Current Risk Status
-    st.markdown("#### 1. Current Risk Profile")
-    risk_metrics = calculate_risk_metrics(df_view, prb_threshold=prb_threshold)
-
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Risk Threshold (PRB)", f"> {prb_threshold}%", help="Cells with load above this value should NOT be in ECO.")
-    c2.metric("High Risk Intervals", f"{risk_metrics['risk_intervals']:,}", help="Number of 30-min intervals where State=ECO and Load > Threshold")
-    c3.metric("Risk % (of Total Time)", f"{risk_metrics['risk_percent_total']:.2f}%", delta_color="inverse", delta=None)
-
-    if risk_metrics["risk_percent_total"] > 1.0:
-        st.warning(f"⚠️ High Risk detected! {risk_metrics['risk_percent_total']:.2f}% of operations coincide with high load.")
-    else:
-        st.success("✅ Operational Risk is within safe limits (< 1%).")
-
-    st.divider()
-
-    # 2. Pareto Sweep
-    st.markdown("#### 2. Optimization Sweep (Pareto Frontier)")
-
-    col_run, col_conf = st.columns([1, 3])
-    with col_conf:
+        st.markdown("#### Optimization Sweep (Pareto Frontier)")
         sweep_range = st.slider("Sweep range for τ_on", 0.0, 1.0, (0.1, 0.9))
         fixed_hysteresis = st.slider("Fixed Hysteresis (τ_on - τ_off)", 0.0, 0.2, 0.1, 0.05)
 
-    with col_run:
-        st.write("")
-        run_opt = st.button("Run Optimization Sweep", type="primary")
+        # Two actions:
+        #  - Apply => recompute risk status
+        #  - Run sweep => expensive operation, explicit click
+        col_a, col_b = st.columns([1, 1])
+        apply_now = col_a.form_submit_button("Apply", type="secondary")
+        run_opt = col_b.form_submit_button("Run Optimization Sweep", type="primary")
 
-    if run_opt:
-        t_min, t_max = sweep_range
-        grid = np.linspace(t_min, t_max, 15)
+    # -------------------------
+    # 1) Current Risk Status (computed after Apply OR Run)
+    # -------------------------
+    if apply_now or run_opt:
+        st.markdown("#### 1. Current Risk Profile")
+        risk_metrics = calculate_risk_metrics(df_view, prb_threshold=float(prb_threshold))
 
-        if "p_sleep_on" not in df_policy_full.columns:
-            st.error("Cannot run optimization: 'p_sleep_on' missing from data. Ensure ML Controller is active.")
-            return
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Risk Threshold (PRB)", f"> {float(prb_threshold):.0f}%")
+        c2.metric("High Risk Intervals", f"{risk_metrics['risk_intervals']:,}")
+        c3.metric("Risk % (of Total Time)", f"{risk_metrics['risk_percent_total']:.2f}%", delta_color="inverse")
 
-        # For consistent scale, sweep on df_view (selected window), not full-day.
-        res_df_view = run_pareto_sweep(
-            df_view,
-            alpha=alpha,
-            tau_on_range=grid,
-            tau_off_offset=fixed_hysteresis,
-            prb_threshold=prb_threshold,
-        )
-
-        base_view = alt.Chart(res_df_view).encode(
-            tooltip=[
-                alt.Tooltip("tau_on", format=".2f"),
-                alt.Tooltip("saved_kwh", format=".1f"),
-                alt.Tooltip("risk_pct", format=".2f"),
-            ]
-        )
-        scatter_view = base_view.mark_circle(size=100).encode(
-            x=alt.X("risk_pct:Q", title="Risk % (Load > Threshold in ECO)"),
-            y=alt.Y("saved_kwh:Q", title="Energy Saved (kWh) - Selected Window"),
-            color=alt.Color("tau_on:Q", scale=alt.Scale(scheme="viridis"), title="Tau On"),
-        )
-
-        curr_point = pd.DataFrame(
-            {
-                "risk_pct": [risk_metrics["risk_percent_total"]],
-                "saved_kwh": [float(df_view["eco_saved_Wh"].sum() / 1000.0)],
-                "label": ["Current"],
-            }
-        )
-        curr_mark = alt.Chart(curr_point).mark_point(shape="diamond", size=200, color="red").encode(
-            x="risk_pct:Q",
-            y="saved_kwh:Q",
-            tooltip=[alt.Tooltip("label")],
-        )
-
-        st.altair_chart((scatter_view + curr_mark).interactive(), width='stretch')
-
-        best_safe = res_df_view[res_df_view["risk_pct"] <= 1.0].sort_values("saved_kwh", ascending=False).head(1)
-        if not best_safe.empty:
-            rec = best_safe.iloc[0]
-            st.info(f"💡 Recommendation: τ_on = {rec['tau_on']:.2f} yields {rec['saved_kwh']:.1f} kWh with only {rec['risk_pct']:.2f}% risk.")
+        if risk_metrics["risk_percent_total"] > 1.0:
+            st.warning(f"⚠️ High Risk detected! {risk_metrics['risk_percent_total']:.2f}% of operations coincide with high load.")
         else:
-            st.warning("No configuration found with Risk < 1%. Consider raising thresholds.")
+            st.success("✅ Operational Risk is within safe limits (< 1%).")
+
+        st.divider()
+    else:
+        st.info("Adjust parameters and click **Apply** (or **Run Optimization Sweep**) to compute risk.")
+        return
+
+    # -------------------------
+    # 2) Pareto Sweep (only on explicit button)
+    # -------------------------
+    if not run_opt:
+        return
+
+    if "p_sleep_on" not in df_policy_full.columns and "p_sleep_on" not in df_view.columns:
+        st.error("Cannot run optimization: 'p_sleep_on' missing from data. Ensure ML Controller is active.")
+        return
+
+    t_min, t_max = sweep_range
+    grid = np.linspace(float(t_min), float(t_max), 15)
+
+    # Sweep on df_view (selected window) to keep it responsive
+    res_df_view = run_pareto_sweep(
+        df_view,
+        alpha=float(alpha),
+        tau_on_range=list(grid),
+        tau_off_offset=float(fixed_hysteresis),
+        prb_threshold=float(prb_threshold),
+    )
+
+    base_view = alt.Chart(res_df_view).encode(
+        tooltip=[
+            alt.Tooltip("tau_on", format=".2f"),
+            alt.Tooltip("saved_kwh", format=".1f"),
+            alt.Tooltip("risk_pct", format=".2f"),
+            alt.Tooltip("eco_coverage_pct", format=".1f"),
+        ]
+    )
+    scatter_view = base_view.mark_circle(size=100).encode(
+        x=alt.X("risk_pct:Q", title="Risk % (Load > Threshold in ECO)"),
+        y=alt.Y("saved_kwh:Q", title="Energy Saved (kWh) - Selected Window"),
+        color=alt.Color("tau_on:Q", title="Tau On"),
+    )
+
+    curr_point = pd.DataFrame(
+        {
+            "risk_pct": [float(risk_metrics["risk_percent_total"])],
+            "saved_kwh": [float(df_view["eco_saved_Wh"].sum() / 1000.0)] if "eco_saved_Wh" in df_view.columns else [0.0],
+            "label": ["Current"],
+        }
+    )
+    curr_mark = alt.Chart(curr_point).mark_point(shape="diamond", size=200, color="red").encode(
+        x="risk_pct:Q",
+        y="saved_kwh:Q",
+        tooltip=[alt.Tooltip("label:N")],
+    )
+
+    st.altair_chart((scatter_view + curr_mark).interactive(), width="stretch")
+
+    best_safe = res_df_view[res_df_view["risk_pct"] <= 1.0].sort_values("saved_kwh", ascending=False).head(1)
+    if not best_safe.empty:
+        rec = best_safe.iloc[0]
+        st.info(
+            f"💡 Recommendation: τ_on = {rec['tau_on']:.2f} yields {rec['saved_kwh']:.1f} kWh "
+            f"with only {rec['risk_pct']:.2f}% risk."
+        )
+    else:
+        st.warning("No configuration found with Risk < 1%. Consider raising thresholds.")
 
 
 def render_tab_distribution_check(df_view: pd.DataFrame, path_5g_train: str):

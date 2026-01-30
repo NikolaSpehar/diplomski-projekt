@@ -1,4 +1,4 @@
-#src/kpis.py
+# src/kpis.py
 from __future__ import annotations
 
 import pandas as pd
@@ -33,7 +33,6 @@ def per_cell_kpis(df: pd.DataFrame) -> pd.DataFrame:
 
     def agg(x: pd.DataFrame) -> pd.Series:
         n = len(x)
-        # bout sizes in number of intervals
         bout_sizes = x.loc[x["bout_id"] > 0, "bout_id"].value_counts()
         mean_bout_intervals = float(bout_sizes.mean()) if len(bout_sizes) else 0.0
         mean_bout_minutes = mean_bout_intervals * (DT_SECONDS / 60.0)
@@ -62,7 +61,6 @@ def per_cell_kpis(df: pd.DataFrame) -> pd.DataFrame:
 
     out = g.groupby(keys, dropna=False).apply(agg, include_groups=False).reset_index()
 
-    # Canonicalize for UI friendliness
     out = out.rename(columns={bs_col: "Base Station ID", cell_col: "Cell ID"})
     return out
 
@@ -85,37 +83,64 @@ def bs_level_gt_vs_pred(df_bs: pd.DataFrame, state_col: str = "State") -> dict:
 def calculate_risk_metrics(df: pd.DataFrame, prb_threshold: float = 20.0) -> dict:
     """
     Risk Proxy:
-    An interval is 'High Risk' if the Controller is in ECO mode 
-    BUT the traffic load (PRB) is > prb_threshold.
-    """
-    if "State" not in df.columns:
-        return {}
+      An interval is 'High Risk' if the Controller is in ECO mode
+      BUT PRB load is > prb_threshold.
 
-    prb_col = resolve_col(df, "prb")
-    
-    # Filter valid rows
-    valid = df.dropna(subset=["State", prb_col]).copy()
-    valid["prb_val"] = pd.to_numeric(valid[prb_col], errors="coerce")
-    
-    total_intervals = len(valid)
-    if total_intervals == 0:
+    IMPORTANT: optimized to avoid big DataFrame copies on every rerun.
+    """
+    if df is None or df.empty:
         return {
             "risk_intervals": 0,
             "risk_percent_total": 0.0,
             "risk_percent_eco": 0.0,
-            "eco_intervals": 0
+            "eco_intervals": 0,
         }
 
-    is_eco = valid["State"] == "ECO"
-    is_high_load = valid["prb_val"] > prb_threshold
-    
+    if "State" not in df.columns:
+        return {
+            "risk_intervals": 0,
+            "risk_percent_total": 0.0,
+            "risk_percent_eco": 0.0,
+            "eco_intervals": 0,
+        }
+
+    prb_col = resolve_col(df, "prb")
+
+    # Extract minimal columns as arrays (no .copy(), no new dataframe)
+    state = df["State"].astype(str).to_numpy()
+    prb = pd.to_numeric(df[prb_col], errors="coerce").to_numpy()
+
+    valid = ~np.isnan(prb) & (state != "UNKNOWN") & (state != "nan")
+    if not np.any(valid):
+        return {
+            "risk_intervals": 0,
+            "risk_percent_total": 0.0,
+            "risk_percent_eco": 0.0,
+            "eco_intervals": 0,
+        }
+
+    state_v = state[valid]
+    prb_v = prb[valid]
+
+    is_eco = (state_v == "ECO")
+    n_total = int(len(state_v))
+    n_eco = int(np.sum(is_eco))
+
+    if n_total == 0:
+        return {
+            "risk_intervals": 0,
+            "risk_percent_total": 0.0,
+            "risk_percent_eco": 0.0,
+            "eco_intervals": 0,
+        }
+
+    is_high_load = prb_v > float(prb_threshold)
     risk_mask = is_eco & is_high_load
-    n_risk = risk_mask.sum()
-    n_eco = is_eco.sum()
+    n_risk = int(np.sum(risk_mask))
 
     return {
-        "risk_intervals": int(n_risk),
-        "risk_percent_total": 100.0 * float(n_risk) / total_intervals,
-        "risk_percent_eco": (100.0 * float(n_risk) / n_eco) if n_eco > 0 else 0.0,
-        "eco_intervals": int(n_eco)
+        "risk_intervals": n_risk,
+        "risk_percent_total": 100.0 * float(n_risk) / float(n_total),
+        "risk_percent_eco": (100.0 * float(n_risk) / float(n_eco)) if n_eco > 0 else 0.0,
+        "eco_intervals": n_eco,
     }
