@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import warnings
-warnings.filterwarnings('ignore', category=RuntimeWarning, module='pandas.io.formats.style')
+warnings.filterwarnings("ignore", category=RuntimeWarning, module="pandas.io.formats.style")
 
 import streamlit as st
 from pathlib import Path
@@ -41,6 +41,7 @@ FILE_MAP = {
     "4G Weekend (Inference)": DATA_DIR / "Performance_4G_Weekend.csv",
 }
 
+
 # -------------------------
 # SESSION DEFAULTS (one-time)
 # -------------------------
@@ -74,18 +75,19 @@ def _init_defaults() -> None:
 
 _init_defaults()
 
+
 # -------------------------
 # SIDEBAR CONTROLS (FORM => no rerun storm)
 # -------------------------
 st.sidebar.header("Dataset & Policy")
 
+# Build once (used in form + later)
+tod_order = [f"{h:02d}:{m:02d}" for h in range(24) for m in (0, 30)]
+
 with st.sidebar.form("controls_form", clear_on_submit=False):
-    dataset_label = st.selectbox(
-        "Select dataset",
-        list(FILE_MAP.keys()),
-        index=list(FILE_MAP.keys()).index(st.session_state["dataset_label"]),
-        key="dataset_label",
-    )
+    # Dataset selector
+    st.selectbox("Select dataset", list(FILE_MAP.keys()), key="dataset_label")
+    dataset_label = st.session_state["dataset_label"]
     path = FILE_MAP[dataset_label]
     path_str = str(path)
 
@@ -93,7 +95,7 @@ with st.sidebar.form("controls_form", clear_on_submit=False):
         st.error(f"File not found: {path}\n\nPlease place the CSV file in: {DATA_DIR}")
         st.stop()
 
-    # --- auto-detect GT based on RAW headers
+    # Auto-detect ground truth from RAW headers
     raw_preview = get_raw_df(path_str)
     gt_cols = ["ds_ms", "Deep Sleep Time (Millisecond)", "Deep Sleep Time"]
     has_gt = any(c in raw_preview.columns for c in gt_cols)
@@ -103,83 +105,59 @@ with st.sidebar.form("controls_form", clear_on_submit=False):
     else:
         st.info("ℹ️ No Ground Truth (4G Mode). Running inference only.")
 
-    # --- Window
+    # Window
     st.divider()
     st.subheader("Analytics window")
+    st.radio("Analytics window", ["Selected time-of-day", "Full day"], key="window_mode")
+    st.select_slider("Time of day (30-min bins)", options=tod_order, key="tod")
 
-    st.radio(
-        "Analytics window",
-        ["Selected time-of-day", "Full day"],
-        index=0 if st.session_state["window_mode"] == "Selected time-of-day" else 1,
-        key="window_mode",
-    )
-
-    tod_order = [f"{h:02d}:{m:02d}" for h in range(24) for m in (0, 30)]
-    st.select_slider(
-        "Time of day (30-min bins)",
-        options=tod_order,
-        key="tod", 
-    )
-    tod_bin = tod_order.index(st.session_state["tod"])
-
-    # --- Controller
+    # Controller
     st.divider()
     st.subheader("Controller")
+    st.slider("Economy saving fraction α (RRU)", 0.1, 0.9, step=0.05, key="alpha")
+    st.radio("Type", ["Heuristic", "ML"], key="controller_type")
 
-    st.slider(
-        "Economy saving fraction α (RRU)",
-        0.1, 0.9, float(st.session_state["alpha"]), 0.05,
-        key="alpha",
-    )
-    st.radio(
-        "Type",
-        ["Heuristic", "ML"],
-        index=0 if st.session_state["controller_type"] == "Heuristic" else 1,
-        key="controller_type",
-    )
-
-    # Defaults (will be overridden by form widgets)
+    # Heuristic controls
     if st.session_state["controller_type"] == "Heuristic":
-        st.selectbox(
-            "Threshold scope",
-            ["Global", "Per-BaseStation", "Per-Cell"],
-            index=["Global", "Per-BaseStation", "Per-Cell"].index(st.session_state["threshold_scope"]),
-            key="threshold_scope",
-        )
-
-        st.checkbox("Hysteresis", value=bool(st.session_state["use_hysteresis"]), key="use_hysteresis")
-        if st.session_state["use_hysteresis"]:
-            st.slider("Hysteresis (Sleep) [pp]", 0.0, 5.0, float(st.session_state["h_sleep"]), key="h_sleep")
-            st.slider("Hysteresis (Eco) [pp]", 0.0, 5.0, float(st.session_state["h_eco"]), key="h_eco")
-
-        # Provide placeholders so downstream code has values
-        st.session_state.setdefault("ml_model_path", str(MODELS_DIR / "sleep_on_5g_weekday.joblib"))
+        st.selectbox("Threshold scope", ["Global", "Per-BaseStation", "Per-Cell"], key="threshold_scope")
+        st.checkbox("Hysteresis", key="use_hysteresis")
+        if bool(st.session_state["use_hysteresis"]):
+            st.slider("Hysteresis (Sleep) [pp]", 0.0, 5.0, step=0.5, key="h_sleep")
+            st.slider("Hysteresis (Eco) [pp]", 0.0, 5.0, step=0.5, key="h_eco")
     else:
-        st.text_input("Model path", value=st.session_state["ml_model_path"], key="ml_model_path")
-        st.checkbox("Hysteresis", value=bool(st.session_state["ml_hyst_en"]), key="ml_hyst_en")
-        st.slider("Enter ECO (p >= )", 0.0, 1.0, float(st.session_state["ml_tau_on"]), key="ml_tau_on")
+        # ML controls
+        st.text_input("Model path", key="ml_model_path")
+        st.checkbox("Hysteresis", key="ml_hyst_en")
+        st.slider("Enter ECO (p >= )", 0.0, 1.0, step=0.01, key="ml_tau_on")
         st.slider(
             "Exit ECO (p <= )",
-            0.0, 1.0, float(st.session_state["ml_tau_off"]),
+            0.0,
+            1.0,
+            step=0.01,
             key="ml_tau_off",
             disabled=not bool(st.session_state["ml_hyst_en"]),
         )
 
         with st.expander("Feature Spec (Advanced)"):
             st.caption("Must match trained model configuration")
-            st.checkbox("Energy Features", value=bool(st.session_state["ml_use_energy"]), key="ml_use_energy")
-            st.checkbox("Prev Features", value=bool(st.session_state["ml_use_prev"]), key="ml_use_prev")
-            st.checkbox("Time Features", value=bool(st.session_state["ml_use_time"]), key="ml_use_time")
-            st.checkbox("Cyclical Time", value=bool(st.session_state["ml_use_cyc"]), key="ml_use_cyc")
+            st.checkbox("Energy Features", key="ml_use_energy")
+            st.checkbox("Prev Features", key="ml_use_prev")
+            st.checkbox("Time Features", key="ml_use_time")
+            st.checkbox("Cyclical Time", key="ml_use_cyc")
 
-    apply_clicked = st.form_submit_button("Apply")
+    st.form_submit_button("Apply")
 
-# If user hasn't clicked Apply yet in this session, we still proceed using defaults.
-# (Form prevents rerun storms while dragging; only commits on click.)
-# Streamlit will keep session_state values anyway.
+# -------------------------
+# READ PARAMS FROM SESSION STATE
+# -------------------------
+dataset_label = st.session_state["dataset_label"]
+path = FILE_MAP[dataset_label]
+path_str = str(path)
+
 window_mode = st.session_state["window_mode"]
 tod = st.session_state["tod"]
 tod_bin = tod_order.index(tod)
+
 controller_type = st.session_state["controller_type"]
 alpha = float(st.session_state["alpha"])
 
@@ -199,6 +177,11 @@ ml_use_energy = bool(st.session_state.get("ml_use_energy", False))
 ml_use_prev = bool(st.session_state.get("ml_use_prev", True))
 ml_use_time = bool(st.session_state.get("ml_use_time", True))
 ml_use_cyc = bool(st.session_state.get("ml_use_cyc", True))
+
+# Ground-truth flag (recompute cheaply from raw headers)
+raw_preview = get_raw_df(path_str)
+gt_cols = ["ds_ms", "Deep Sleep Time (Millisecond)", "Deep Sleep Time"]
+has_gt = any(c in raw_preview.columns for c in gt_cols)
 
 # -------------------------
 # COMPUTATION
