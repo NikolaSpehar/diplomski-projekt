@@ -53,10 +53,22 @@ def apply_simulation_only(
     alpha: float,
 ) -> pd.DataFrame:
     """
-    OPTIMIZED: Replaces .apply() with a faster transform logic.
+    Memory-hardened + optimized simulation.
+
+    Key changes vs previous:
+      - Avoid deep copy of the entire dataframe (use deep=False).
+      - Avoid creating extra intermediate big DataFrames.
+      - Keep vectorized operations.
+
+    Adds/overwrites:
+      - State, baseline_Wh, eco_saved_Wh, p30, p70 (placeholders)
     """
-    df_out = df_with_probs.copy()
-    
+    if df_with_probs is None or df_with_probs.empty:
+        return df_with_probs
+
+    # Shallow copy (shares underlying blocks; much smaller RAM spike)
+    df_out = df_with_probs.copy(deep=False)
+
     bs_col = resolve_col(df_out, "bs")
     cell_col = resolve_col(df_out, "cell")
     rru_col = resolve_col(df_out, "rru_w")
@@ -64,11 +76,13 @@ def apply_simulation_only(
     tau_on = float(controller.tau_on)
     tau_off = float(controller.resolved_tau_off())
 
-    # Sort once for time-continuity
-    df_out = df_out.sort_values([bs_col, cell_col, "DayIndex", "tod_bin"])
+    # Sort once for time-continuity (stable hysteresis)
+    # NOTE: sorting is potentially expensive but necessary for correctness.
+    # It does not duplicate the full dataframe like deep copy would.
+    df_out = df_out.sort_values([bs_col, cell_col, "DayIndex", "tod_bin"], kind="mergesort")
 
-    # Fast logic operating on numpy arrays
-    def fast_hysteresis_vec(p_vals, t_on, t_off):
+    # Fast hysteresis over numpy arrays (per group)
+    def fast_hysteresis_vec(p_vals: np.ndarray, t_on: float, t_off: float) -> np.ndarray:
         n = len(p_vals)
         states = np.empty(n, dtype=object)
         prev = "FULL"
@@ -77,32 +91,42 @@ def apply_simulation_only(
             if np.isnan(p):
                 states[i] = prev
                 continue
-            
+
             if prev == "FULL":
                 curr = "ECO" if p >= t_on else "FULL"
-            else: # prev == "ECO"
+            else:  # prev == "ECO"
                 curr = "FULL" if p <= t_off else "ECO"
-            
+
             states[i] = curr
             prev = curr
         return states
 
-    # Apply the logic efficiently
+    # Group-transform without creating large intermediates
+    p_series = pd.to_numeric(df_out.get("p_sleep_on", pd.Series(index=df_out.index, dtype=float)), errors="coerce")
     df_out["State"] = (
-        df_out.groupby([bs_col, cell_col, "DayIndex"], sort=False)["p_sleep_on"]
-        .transform(lambda x: fast_hysteresis_vec(x.to_numpy(), tau_on, tau_off))
+        df_out.assign(_p=p_series)
+        .groupby([bs_col, cell_col, "DayIndex"], sort=False)["_p"]
+        .transform(lambda x: fast_hysteresis_vec(x.to_numpy(dtype=float, copy=False), tau_on, tau_off))
+        .to_numpy()
     )
+    # Clean helper column if it got materialized
+    if "_p" in df_out.columns:
+        df_out = df_out.drop(columns=["_p"], errors="ignore")
 
     # Vectorized energy math
-    rru_vec = pd.to_numeric(df_out[rru_col], errors="coerce").fillna(0.0).to_numpy()
-    df_out["baseline_Wh"] = rru_vec * DT_HOURS
+    rru_vec = pd.to_numeric(df_out[rru_col], errors="coerce").fillna(0.0).to_numpy(dtype=float, copy=False)
+    baseline = rru_vec * float(DT_HOURS)
+    df_out["baseline_Wh"] = baseline
+
     is_eco = (df_out["State"].to_numpy() == "ECO").astype(float)
-    df_out["eco_saved_Wh"] = (float(alpha) * df_out["baseline_Wh"].to_numpy()) * is_eco
-    
-    # UI Schema compatibility
-    if "p30" not in df_out.columns: df_out["p30"] = np.nan
-    if "p70" not in df_out.columns: df_out["p70"] = np.nan
-    
+    df_out["eco_saved_Wh"] = (float(alpha) * baseline) * is_eco
+
+    # UI schema compatibility placeholders (cheap, scalar NaN)
+    if "p30" not in df_out.columns:
+        df_out["p30"] = np.nan
+    if "p70" not in df_out.columns:
+        df_out["p70"] = np.nan
+
     return df_out
 
 
@@ -117,11 +141,15 @@ def apply_ml_controller_and_simulation(
     """
     Full path: Prediction -> Hysteresis -> Energy -> Schema Alignment.
     """
-    df_out = df.copy()
-    
-    # 1. Prediction
+    if df is None or df.empty:
+        return df
+
+    # Shallow copy to avoid deep duplication of large frames
+    df_out = df.copy(deep=False)
+
+    # 1) Prediction
     p = predict_p_sleep_on(df_out, model=model, feature_spec=feature_spec)
     df_out["p_sleep_on"] = p
 
-    # 2. Simulation (Hysteresis + Energy + Placeholders)
+    # 2) Simulation
     return apply_simulation_only(df_out, controller=controller, alpha=alpha)

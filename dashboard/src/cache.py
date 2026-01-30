@@ -6,7 +6,7 @@ import pandas as pd
 import streamlit as st
 
 from src.io import load_csv
-from src.config import canonicalize_columns, validate_schema
+from src.config import canonicalize_columns, validate_schema, resolve_col
 from src.features import prepare_5g
 from src.aggregations import (
     apply_policy_and_simulation,
@@ -92,7 +92,6 @@ def get_prepared_df(source_path: str) -> pd.DataFrame:
     raw = get_raw_df(source_path)
     df = prepare_5g(raw)
 
-    # 4G files won't have sleep_on, but pipeline adds them as 0.
     has_gt = "sleep_on" in df.columns and not df["sleep_on"].eq(0).all()
 
     req_cols = ["tod_bin", "DayIndex"]
@@ -130,9 +129,40 @@ def get_ml_model_cached(model_path: str):
     return load_ml_model(model_path)
 
 
-# -------------------------
-# NEW: cache only probabilities (expensive part), bounded cache
-# -------------------------
+def _min_cols_for_ml(df: pd.DataFrame) -> list[str]:
+    """
+    Keep only columns required by:
+      - UI tabs (traffic/users/prb/rru + ids + window labels)
+      - ML controller simulation (DayIndex, tod_bin, p_sleep_on)
+      - optional GT (sleep_on/sleep_frac) if present (5G)
+    """
+    bs = resolve_col(df, "bs")
+    cell = resolve_col(df, "cell")
+    prb = resolve_col(df, "prb")
+    traffic = resolve_col(df, "traffic_kb")
+    users = resolve_col(df, "users")
+    rru = resolve_col(df, "rru_w")
+    ts = resolve_col(df, "ts")
+
+    cols = [
+        bs, cell, ts,
+        prb, traffic, users, rru,
+        "tod_bin", "DayIndex",
+    ]
+    # Nice-to-have labels if present
+    if "TimeOfDay" in df.columns:
+        cols.append("TimeOfDay")
+    # Optional GT columns
+    if "sleep_on" in df.columns:
+        cols.append("sleep_on")
+    if "sleep_frac" in df.columns:
+        cols.append("sleep_frac")
+
+    # Keep only existing (robust)
+    cols = [c for c in cols if c in df.columns]
+    return cols
+
+
 @st.cache_data(show_spinner=False, max_entries=2, ttl=3600)
 def get_probs_df_cached(
     source_path: str,
@@ -146,8 +176,9 @@ def get_probs_df_cached(
     """
     Compute p_sleep_on once per dataset + model + feature spec.
 
-    This isolates the heavy inference step from tau tuning
-    (tau changes become cheap: apply_simulation_only only).
+    MEMORY HARDENING:
+      - Keep only a minimal subset of columns (prevents caching massive frames).
+      - Avoid deep copies.
     """
     df = get_prepared_df(source_path)
 
@@ -160,10 +191,13 @@ def get_probs_df_cached(
     )
 
     p = predict_p_sleep_on(df, model=model, feature_spec=fsp)
-    out = df.copy()
-    out["p_sleep_on"] = p
 
-    # Provide placeholders for UI schema compatibility (some tabs expect these)
+    # Minimal frame for downstream UI + simulation
+    keep = _min_cols_for_ml(df)
+    out = df[keep].copy(deep=False)  # shallow
+    out["p_sleep_on"] = np.clip(p.astype(float), 0.0, 1.0)
+
+    # Schema placeholders (tabs expect these to exist sometimes)
     if "p30" not in out.columns:
         out["p30"] = pd.NA
     if "p70" not in out.columns:
@@ -172,9 +206,6 @@ def get_probs_df_cached(
     return out
 
 
-# -------------------------
-# POLICY DF (bounded cache!)
-# -------------------------
 @st.cache_data(show_spinner=False, max_entries=2, ttl=3600)
 def get_policy_df(
     source_path: str,
@@ -191,15 +222,14 @@ def get_policy_df(
     ml_tau_on: float,
     ml_tau_off: float,
     ml_hysteresis_enabled: bool,
-    # ML feature spec (must match the trained model)
+    # ML feature spec
     ml_use_energy_features: bool,
     ml_use_prev_features: bool,
     ml_use_time_features: bool,
     ml_use_time_cyclical: bool,
 ) -> pd.DataFrame:
-    df = get_prepared_df(source_path)
-
     if controller_type == "Heuristic":
+        df = get_prepared_df(source_path)
         thr = get_thresholds_df(source_path, threshold_scope)
 
         out = apply_policy_and_simulation(
@@ -221,7 +251,6 @@ def get_policy_df(
         return out
 
     if controller_type == "ML":
-        # Heavy part cached separately (probs)
         df_probs = get_probs_df_cached(
             source_path,
             ml_model_path=ml_model_path,
@@ -237,7 +266,6 @@ def get_policy_df(
             hysteresis_enabled=bool(ml_hysteresis_enabled),
         )
 
-        # Cheap part: hysteresis + energy only
         out = apply_simulation_only(
             df_probs,
             controller=ctrl,
@@ -261,12 +289,10 @@ def get_view_df(
     *,
     controller_type: str,
     alpha: float,
-    # Heuristic
     threshold_scope: str,
     hysteresis_enabled: bool,
     h_sleep: float,
     h_eco: float,
-    # ML
     ml_model_path: str,
     ml_tau_on: float,
     ml_tau_off: float,
@@ -275,7 +301,6 @@ def get_view_df(
     ml_use_prev_features: bool,
     ml_use_time_features: bool,
     ml_use_time_cyclical: bool,
-    # Window
     window_mode: str,
     tod_bin: int,
 ) -> pd.DataFrame:
